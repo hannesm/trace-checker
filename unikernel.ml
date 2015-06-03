@@ -8,15 +8,11 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
   module T = Tcp.Flow.Make(I)(OS.Time)(Clock)(Random)
   (*  module Stack = Tcpip_stack_direct.Make(C)(OS.Time)(Random)(Netif)(Stackv41_E)(Stackv41_I)(Stackv41_U)(Stackv41_T) *)
 
-  let file = "dump-ff.pcap"
+  let file = "tlssession.pcap"
 
   (* guess that is ok... *)
   let ip = Ipaddr.V4.of_string_exn "1.1.1.1"
   let nm = Ipaddr.V4.of_string_exn "0.0.0.0"
-
-  let printer = function
-    | `Success -> "Success"
-    | `Failure s -> s
 
   let start c k =
 
@@ -38,12 +34,13 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
 
     let server_cb flow =
       Printf.printf "server callback\n%!" ;
-      (*      Lwt.return_unit*)
-      T.read flow >>= function
+      Lwt.return_unit
+        (* T.read flow >>= function
       | `Ok buf -> Printf.printf "received" ; Cstruct.hexdump buf ; Lwt.return_unit
-        | err -> Lwt.return_unit
+           | err -> Lwt.return_unit *)
     in
-    let i = ref 0 in
+    let i = ref 1 in
+    let first : Cstruct.t option ref = ref None in
     let recv_ip t buf =
       let proto = Wire_structs.Ipv4_wire.get_ipv4_proto buf in
       match Wire_structs.Ipv4_wire.int_to_protocol proto with
@@ -53,19 +50,36 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
         and ihl = (Wire_structs.Ipv4_wire.get_ipv4_hlen_version buf land 0xf) * 4 in
         let _, tcp = Cstruct.split buf ihl
         in
-        if !not_initialised then
-          begin
-            (* we assume to have a SYN here! *)
-            let src_port = Wire_structs.Tcp_wire.get_tcp_src_port tcp in
-            let dst_port = Wire_structs.Tcp_wire.get_tcp_dst_port tcp in
-            (*client t tcp dst >>= fun client_flow -> *)
-            
-            not_initialised := false
-          end ;
-        Printf.printf "received tcp %d (%s -> %s):" !i (Ipaddr.V4.to_string src) (Ipaddr.V4.to_string dst); Cstruct.hexdump tcp ;
-        i := succ !i ;
-        Lwt.async (fun () -> T.input t ~listeners:(function 443 -> Some server_cb | _ -> None) ~src ~dst tcp);
-        Lwt.return_unit
+        let src_port = Wire_structs.Tcp_wire.get_tcp_src_port tcp in
+        let dst_port = Wire_structs.Tcp_wire.get_tcp_dst_port tcp in
+        (match !first with
+         | Some x ->
+           (* tcp better be a synack *)
+           let tx_isn = Wire_structs.Tcp_wire.get_tcp_sequence tcp in
+           T.next_isn tx_isn ;
+           Printf.printf "received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string dst) dst_port (Ipaddr.V4.to_string src) src_port; Cstruct.hexdump x ;
+           i := succ !i ;
+           Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src:dst ~dst:src x);
+           first := None ;
+           Lwt.return_unit
+         | None ->
+           if !not_initialised then
+             begin
+               (* we assume to have a SYN here! *)
+               (*client t tcp dst >>= fun client_flow -> *)
+               first := Some tcp ;
+               not_initialised := false ;
+               Printf.printf "received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
+               i := succ !i ;
+               Lwt.return_unit
+             end
+           else
+             begin
+               Printf.printf "received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
+               i := succ !i ;
+               Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src ~dst tcp);
+               Lwt.return_unit
+             end )
       | _ -> Lwt.return_unit
     in
     let setup_iface ?(timing=None) file ip nm =
@@ -94,8 +108,10 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
     Lwt.async_exception_hook := (fun e ->
         Printf.printf "exception %s, backtrace\n%s"
           (Printexc.to_string e) (Printexc.get_backtrace ())) ;
-    setup_iface file ip nm >>= fun send_arp_test_stack ->
-    play_pcap send_arp_test_stack >>= fun (p, e, i, t) ->
+    Tcp.(Log.enable Pcb.debug);
+    Tcp.(Log.enable State.debug);
+    setup_iface file ip nm >>= fun x ->
+    play_pcap x >>= fun (p, e, i, t) ->
     (* test_send_arps p e u >>= fun result ->
        assert_equal ~printer `Success result; *)
     Lwt.return_unit
