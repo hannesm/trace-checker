@@ -23,25 +23,32 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
     in
 
     let not_initialised = ref true in
-    let client t tcp dest_ip =
+    let client t tcp src dest_ip =
       let src_port = Wire_structs.Tcp_wire.get_tcp_src_port tcp
       and dest_port = Wire_structs.Tcp_wire.get_tcp_dst_port tcp
       and isn = Tcp.Sequence.of_int (Int32.to_int (Wire_structs.Tcp_wire.get_tcp_sequence tcp))
       and window = Wire_structs.Tcp_wire.get_tcp_window tcp
       in
+      Printf.printf "setting up TCB for client: %s %d %s %d\n"
+        (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dest_ip) dest_port ;
       T.connect_pcb ~window ~isn ~src_port t ~dest_ip ~dest_port
     in
 
+    let server_data = ref [] in
+    let client_data = ref [] in
+
     let server_cb flow =
       Printf.printf "server callback\n%!" ;
-      Lwt.return_unit
-        (* T.read flow >>= function
-      | `Ok buf -> Printf.printf "received" ; Cstruct.hexdump buf ; Lwt.return_unit
-           | err -> Lwt.return_unit *)
+      let rec recv () =
+        T.read flow >>= function
+        | `Ok buf -> server_data := buf :: !server_data ; recv ()
+        | err -> Lwt.return_unit
+      in
+      recv ()
     in
     let i = ref 1 in
     let first : Cstruct.t option ref = ref None in
-    let recv_ip t buf =
+    let recv_ip ip t buf =
       let proto = Wire_structs.Ipv4_wire.get_ipv4_proto buf in
       match Wire_structs.Ipv4_wire.int_to_protocol proto with
       | Some `TCP ->
@@ -57,21 +64,32 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
            (* tcp better be a synack *)
            let tx_isn = Wire_structs.Tcp_wire.get_tcp_sequence tcp in
            T.next_isn tx_isn ;
-           Printf.printf "received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string dst) dst_port (Ipaddr.V4.to_string src) src_port; Cstruct.hexdump x ;
+           (* Printf.printf "replaying first received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string dst) dst_port (Ipaddr.V4.to_string src) src_port; Cstruct.hexdump x ;*)
+           Printf.printf "replaying tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
            i := succ !i ;
            Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src:dst ~dst:src x);
+           Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src ~dst tcp);
            first := None ;
            Lwt.return_unit
          | None ->
            if !not_initialised then
              begin
                (* we assume to have a SYN here! *)
-               (*client t tcp dst >>= fun client_flow -> *)
                first := Some tcp ;
                not_initialised := false ;
                Printf.printf "received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
                i := succ !i ;
-               Lwt.return_unit
+               (* setup client pcb *)
+               I.set_ip ip src >|= fun () ->
+               Lwt.async (fun () -> client t tcp src dst >>= function
+                 | `Ok (flow, _) -> (Printf.printf "client flow is here\n%!" ;
+                                     let rec recv () =
+                                       T.read flow >>= function
+                                       | `Ok buf -> client_data := buf :: !client_data ; recv ()
+                                       | err -> Printf.printf "failed reading from client\n%!" ; Lwt.return_unit
+                                     in
+                                     recv ())
+                 | _ -> Printf.printf "failed client\n%!" ; Lwt.return_unit) ;
              end
            else
              begin
@@ -100,7 +118,7 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
     let play_pcap (p, e, i, t) =
       P.listen p (E.input
                     ~arpv4:(fun buf -> Lwt.return_unit)
-                    ~ipv4:(fun buf -> recv_ip t buf)
+                    ~ipv4:(fun buf -> recv_ip i t buf)
                     ~ipv6:(fun buf -> Lwt.return_unit) e
                  ) >>= fun () ->
       Lwt.return (p, e, i, t)
@@ -110,9 +128,12 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
           (Printexc.to_string e) (Printexc.get_backtrace ())) ;
     Tcp.(Log.enable Pcb.debug);
     Tcp.(Log.enable State.debug);
+    Tcp.(Log.enable Segment.debug);
     setup_iface file ip nm >>= fun x ->
     play_pcap x >>= fun (p, e, i, t) ->
     (* test_send_arps p e u >>= fun result ->
        assert_equal ~printer `Success result; *)
+    Printf.printf "finished... client data %d:" (List.length !client_data) ; List.iter Cstruct.hexdump !client_data ;
+    Printf.printf "server data %d:" (List.length !server_data) ; List.iter Cstruct.hexdump !server_data ;
     Lwt.return_unit
 end
