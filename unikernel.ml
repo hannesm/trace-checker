@@ -22,7 +22,6 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
       | `Ok t -> return t
     in
 
-    let not_initialised = ref true in
     let client t tcp src dest_ip =
       let src_port = Wire_structs.Tcp_wire.get_tcp_src_port tcp
       and dest_port = Wire_structs.Tcp_wire.get_tcp_dst_port tcp
@@ -58,6 +57,15 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
 
     let i = ref 1 in
     let first : Cstruct.t option ref = ref None in
+    let flow = ref None in
+    let flow_matches_packet (f_s, f_s_p, f_d, f_d_p) src src_port dst dst_port =
+      (Ipaddr.V4.compare f_s src = 0 &&
+       Ipaddr.V4.compare f_d dst = 0 &&
+       f_s_p = src_port && f_d_p = dst_port) ||
+      (Ipaddr.V4.compare f_s dst = 0 &&
+       Ipaddr.V4.compare f_d src = 0 &&
+       f_s_p = dst_port && f_d_p = src_port)
+    in
     let recv_ip ip t buf =
       let proto = Wire_structs.Ipv4_wire.get_ipv4_proto buf in
       match Wire_structs.Ipv4_wire.int_to_protocol proto with
@@ -69,48 +77,51 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
         in
         let src_port = Wire_structs.Tcp_wire.get_tcp_src_port tcp in
         let dst_port = Wire_structs.Tcp_wire.get_tcp_dst_port tcp in
-        (match !first with
-         | Some x ->
-           (* tcp better be a synack *)
-           (* for the server side, we prepare a special sequence number :) *)
-           let tx_isn = Wire_structs.Tcp_wire.get_tcp_sequence tcp in
-           T.next_isn tx_isn ;
+        match !flow, !first with
+        | None, None ->
+          (* we demand a SYN here! *)
+          (match Wire_structs.Tcp_wire.(get_syn tcp, get_fin tcp, get_ack tcp, get_rst tcp) with
+           | true, false, false, false ->
+             first := Some tcp ;
+             flow := Some (src, src_port, dst, dst_port) ;
 
-           Printf.printf "replaying first received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string dst) dst_port (Ipaddr.V4.to_string src) src_port; Cstruct.hexdump x ;
-           i := succ !i ;
-           Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src:dst ~dst:src x);
+             (* setup stack: IP address and arp entries *)
+             I.set_ip ip src >>= fun () ->
+             let insert_arp ipaddr =
+               let frame = Cstruct.create 42 in
+               Cstruct.BE.set_uint16 frame 20 2 ;
+               Cstruct.BE.set_uint32 frame 28 (Ipaddr.V4.to_int32 ipaddr) ;
+               I.input_arpv4 ip frame
+             in
+             insert_arp src >>= fun () ->
+             insert_arp dst >|= fun () ->
 
-           Printf.printf "replaying tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
-           i := succ !i ;
-           Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src ~dst tcp);
-           first := None ;
-           Lwt.return_unit
-         | None when !not_initialised ->
-           (* we assume to have a SYN here! *)
-           first := Some tcp ;
-           not_initialised := false ;
+             (* setup client pcb *)
+             Lwt.async (fun () -> client t tcp src dst >>= function
+               | `Ok (flow, _) -> client_cb flow
+               | _ -> Printf.printf "failed client\n%!" ; Lwt.return_unit)
+           | _ -> Lwt.return_unit)
+        | Some flow, Some x when flow_matches_packet flow src src_port dst dst_port ->
+          (* tcp better be a synack *)
+          (* for the server side, we prepare a special sequence number :) *)
+          let tx_isn = Wire_structs.Tcp_wire.get_tcp_sequence tcp in
+          T.next_isn tx_isn ;
 
-           (* setup stack: IP address and arp entries *)
-           I.set_ip ip src >>= fun () ->
-           let insert_arp ipaddr =
-             let frame = Cstruct.create 42 in
-             Cstruct.BE.set_uint16 frame 20 2 ;
-             Cstruct.BE.set_uint32 frame 28 (Ipaddr.V4.to_int32 ipaddr) ;
-             I.input_arpv4 ip frame
-           in
-           insert_arp src >>= fun () ->
-           insert_arp dst >|= fun () ->
+          Printf.printf "replaying first received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string dst) dst_port (Ipaddr.V4.to_string src) src_port; Cstruct.hexdump x ;
+          i := succ !i ;
+          Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src:dst ~dst:src x);
 
-           (* setup client pcb *)
-           Lwt.async (fun () -> client t tcp src dst >>= function
-             | `Ok (flow, _) -> client_cb flow
-             | _ -> Printf.printf "failed client\n%!" ; Lwt.return_unit) ;
-         | None ->
-           Printf.printf "received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
-           i := succ !i ;
-           Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src ~dst tcp);
-           Lwt.return_unit )
-      | _ -> Lwt.return_unit
+          Printf.printf "replaying tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
+          i := succ !i ;
+          Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src ~dst tcp);
+          first := None ;
+          Lwt.return_unit
+        | Some flow, None when flow_matches_packet flow src src_port dst dst_port ->
+          Printf.printf "received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
+          i := succ !i ;
+          Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src ~dst tcp);
+          Lwt.return_unit
+        | _ -> Printf.printf "unmatched frame\n%!" ; Lwt.return_unit
     in
     let setup_iface ?(timing=None) file ip nm =
 
