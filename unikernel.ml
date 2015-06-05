@@ -46,6 +46,16 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
       in
       recv ()
     in
+    let client_cb flow =
+      Printf.printf "client callback\n%!" ;
+      let rec recv () =
+        T.read flow >>= function
+        | `Ok buf -> client_data := buf :: !client_data ; recv ()
+        | err -> Lwt.return_unit
+      in
+      recv ()
+    in
+
     let i = ref 1 in
     let first : Cstruct.t option ref = ref None in
     let recv_ip ip t buf =
@@ -62,12 +72,16 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
         (match !first with
          | Some x ->
            (* tcp better be a synack *)
+           (* for the server side, we prepare a special sequence number :) *)
            let tx_isn = Wire_structs.Tcp_wire.get_tcp_sequence tcp in
            T.next_isn tx_isn ;
-           (* Printf.printf "replaying first received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string dst) dst_port (Ipaddr.V4.to_string src) src_port; Cstruct.hexdump x ;*)
-           Printf.printf "replaying tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
+
+           Printf.printf "replaying first received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string dst) dst_port (Ipaddr.V4.to_string src) src_port; Cstruct.hexdump x ;
            i := succ !i ;
            Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src:dst ~dst:src x);
+
+           Printf.printf "replaying tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
+           i := succ !i ;
            Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src ~dst tcp);
            first := None ;
            Lwt.return_unit
