@@ -91,7 +91,15 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
            not_initialised := false ;
 
            (* setup stack: IP address and arp entries *)
-           I.set_ip ip src >|= fun () ->
+           I.set_ip ip src >>= fun () ->
+           let insert_arp ipaddr =
+             let frame = Cstruct.create 42 in
+             Cstruct.BE.set_uint16 frame 20 2 ;
+             Cstruct.BE.set_uint32 frame 28 (Ipaddr.V4.to_int32 ipaddr) ;
+             I.input_arpv4 ip frame
+           in
+           insert_arp src >>= fun () ->
+           insert_arp dst >|= fun () ->
 
            (* setup client pcb *)
            Lwt.async (fun () -> client t tcp src dst >>= function
