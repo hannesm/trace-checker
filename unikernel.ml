@@ -85,33 +85,23 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
            Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src ~dst tcp);
            first := None ;
            Lwt.return_unit
+         | None when !not_initialised ->
+           (* we assume to have a SYN here! *)
+           first := Some tcp ;
+           not_initialised := false ;
+
+           (* setup stack: IP address and arp entries *)
+           I.set_ip ip src >|= fun () ->
+
+           (* setup client pcb *)
+           Lwt.async (fun () -> client t tcp src dst >>= function
+             | `Ok (flow, _) -> client_cb flow
+             | _ -> Printf.printf "failed client\n%!" ; Lwt.return_unit) ;
          | None ->
-           if !not_initialised then
-             begin
-               (* we assume to have a SYN here! *)
-               first := Some tcp ;
-               not_initialised := false ;
-               Printf.printf "received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
-               i := succ !i ;
-               (* setup client pcb *)
-               I.set_ip ip src >|= fun () ->
-               Lwt.async (fun () -> client t tcp src dst >>= function
-                 | `Ok (flow, _) -> (Printf.printf "client flow is here\n%!" ;
-                                     let rec recv () =
-                                       T.read flow >>= function
-                                       | `Ok buf -> client_data := buf :: !client_data ; recv ()
-                                       | err -> Printf.printf "failed reading from client\n%!" ; Lwt.return_unit
-                                     in
-                                     recv ())
-                 | _ -> Printf.printf "failed client\n%!" ; Lwt.return_unit) ;
-             end
-           else
-             begin
-               Printf.printf "received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
-               i := succ !i ;
-               Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src ~dst tcp);
-               Lwt.return_unit
-             end )
+           Printf.printf "received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
+           i := succ !i ;
+           Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src ~dst tcp);
+           Lwt.return_unit )
       | _ -> Lwt.return_unit
     in
     let setup_iface ?(timing=None) file ip nm =
