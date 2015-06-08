@@ -107,8 +107,8 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
               (* setup client pcb *)
               Lwt.async (fun () -> client t tcp src dst >>= function
                 | `Ok (flow, _) -> client_cb flow
-                | _ -> Printf.printf "failed client\n%!" ; Lwt.return_unit)
-            | _ -> Printf.printf "skipping first TCP frame (not a SYN only)\n%!" ; Lwt.return_unit)
+                | _ -> log "failed client" ; Lwt.return_unit)
+            | _ -> log "skipping first TCP frame (not a SYN only)" ; Lwt.return_unit)
          | Some flow, Some x when flow_matches_packet flow src src_port dst dst_port ->
            (* tcp better be a synack, and coming from server to client *)
            (* for the server side, we prepare a special sequence number *)
@@ -159,8 +159,8 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
     in
 
     Lwt.async_exception_hook := (fun e ->
-        Printf.printf "exception %s, backtrace\n%s"
-          (Printexc.to_string e) (Printexc.get_backtrace ())) ;
+        log (Printf.sprintf "exception %s, backtrace\n%s"
+               (Printexc.to_string e) (Printexc.get_backtrace ()))) ;
     Tcp.(Log.enable Pcb.debug);
     Tcp.(Log.enable State.debug);
     Tcp.(Log.enable Segment.debug);
