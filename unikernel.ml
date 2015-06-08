@@ -36,8 +36,10 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
     let server_data = ref [] in
     let client_data = ref [] in
 
+    let log = C.log c in
+
     let server_cb flow =
-      Printf.printf "server callback\n%!" ;
+      log "server callback" ;
       let rec recv () =
         T.read flow >>= function
         | `Ok buf -> server_data := buf :: !server_data ; recv ()
@@ -46,7 +48,7 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
       recv ()
     in
     let client_cb flow =
-      Printf.printf "client callback\n%!" ;
+      log "client callback" ;
       let rec recv () =
         T.read flow >>= function
         | `Ok buf -> client_data := buf :: !client_data ; recv ()
@@ -55,7 +57,6 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
       recv ()
     in
 
-    let i = ref 1 in
     let first : Cstruct.t option ref = ref None in
     let flow = ref None in
     let flow_matches_packet (f_s, f_s_p, f_d, f_d_p) src src_port dst dst_port =
@@ -66,7 +67,7 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
        Ipaddr.V4.compare f_d src = 0 &&
        f_s_p = dst_port && f_d_p = src_port)
     in
-    let recv_ip ip t buf =
+    let recv_ip ip t count buf =
       let proto = Wire_structs.Ipv4_wire.get_ipv4_proto buf in
       match Wire_structs.Ipv4_wire.int_to_protocol proto with
       | Some `TCP ->
@@ -77,54 +78,61 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
         in
         let src_port = Wire_structs.Tcp_wire.get_tcp_src_port tcp in
         let dst_port = Wire_structs.Tcp_wire.get_tcp_dst_port tcp in
-        match !flow, !first with
-        | None, None ->
-          (* we demand a SYN here! *)
-          (match Wire_structs.Tcp_wire.(get_syn tcp, get_fin tcp, get_ack tcp, get_rst tcp) with
-           | true, false, false, false ->
-             first := Some tcp ;
-             flow := Some (src, src_port, dst, dst_port) ;
+        let flow_to_string (src, src_port, dst, dst_port) =
+          Printf.sprintf "%s:%d -> %s:%d"
+            (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port
+        in
+        let log_packet prefix flow =
+          log (prefix ^ ": " ^ flow_to_string flow)
+        in
+        (match !flow, !first with
+         | None, None ->
+           (* we demand a SYN here! *)
+           (match Wire_structs.Tcp_wire.(get_syn tcp, get_fin tcp, get_ack tcp, get_rst tcp) with
+            | true, false, false, false ->
+              first := Some tcp ;
+              flow := Some (src, src_port, dst, dst_port) ;
 
-             (* setup stack: IP address and arp entries *)
-             I.set_ip ip src >>= fun () ->
-             let insert_arp ipaddr =
-               let frame = Cstruct.create 42 in
-               Cstruct.BE.set_uint16 frame 20 2 ;
-               Cstruct.BE.set_uint32 frame 28 (Ipaddr.V4.to_int32 ipaddr) ;
-               I.input_arpv4 ip frame
-             in
-             insert_arp src >>= fun () ->
-             insert_arp dst >|= fun () ->
+              (* setup stack: IP address and arp entries *)
+              I.set_ip ip src >>= fun () ->
+              let insert_arp ipaddr =
+                let frame = Cstruct.create 42 in (* length of an ARP frame + ethernet *)
+                Cstruct.BE.set_uint16 frame 20 2 ; (* ARP reply *)
+                Cstruct.BE.set_uint32 frame 28 (Ipaddr.V4.to_int32 ipaddr) ; (* sender protocol address *)
+                I.input_arpv4 ip frame
+              in
+              insert_arp src >>= fun () ->
+              insert_arp dst >|= fun () ->
 
-             (* setup client pcb *)
-             Lwt.async (fun () -> client t tcp src dst >>= function
-               | `Ok (flow, _) -> client_cb flow
-               | _ -> Printf.printf "failed client\n%!" ; Lwt.return_unit)
-           | _ -> Lwt.return_unit)
-        | Some flow, Some x when flow_matches_packet flow src src_port dst dst_port ->
-          (* tcp better be a synack *)
-          (* for the server side, we prepare a special sequence number :) *)
-          let tx_isn = Wire_structs.Tcp_wire.get_tcp_sequence tcp in
-          T.next_isn tx_isn ;
+              (* setup client pcb *)
+              Lwt.async (fun () -> client t tcp src dst >>= function
+                | `Ok (flow, _) -> client_cb flow
+                | _ -> Printf.printf "failed client\n%!" ; Lwt.return_unit)
+            | _ -> Printf.printf "skipping first TCP frame (not a SYN only)\n%!" ; Lwt.return_unit)
+         | Some flow, Some x when flow_matches_packet flow src src_port dst dst_port ->
+           (* tcp better be a synack, and coming from server to client *)
+           (* for the server side, we prepare a special sequence number *)
+           let tx_isn = Wire_structs.Tcp_wire.get_tcp_sequence tcp in
+           T.next_isn tx_isn ;
 
-          Printf.printf "replaying first received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string dst) dst_port (Ipaddr.V4.to_string src) src_port; Cstruct.hexdump x ;
-          i := succ !i ;
-          Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src:dst ~dst:src x);
+           let (_, _, _, server_port) = flow in
+           log_packet (Printf.sprintf "frame %d" count) (dst, dst_port, src, src_port) ;
+           Lwt.async (fun () -> T.input t ~listeners:(function x when x = server_port -> Some server_cb | _ -> None) ~src:dst ~dst:src x);
 
-          Printf.printf "replaying tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
-          i := succ !i ;
-          Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src ~dst tcp);
-          first := None ;
-          Lwt.return_unit
-        | Some flow, None when flow_matches_packet flow src src_port dst dst_port ->
-          Printf.printf "received tcp %d (%s:%d -> %s:%d):" !i (Ipaddr.V4.to_string src) src_port (Ipaddr.V4.to_string dst) dst_port; Cstruct.hexdump tcp ;
-          i := succ !i ;
-          Lwt.async (fun () -> T.input t ~listeners:(function 4433 -> Some server_cb | _ -> None) ~src ~dst tcp);
-          Lwt.return_unit
-        | _ -> Printf.printf "unmatched frame\n%!" ; Lwt.return_unit
+           log_packet (Printf.sprintf "frame %d" count) (src, src_port, dst, dst_port) ;
+           Lwt.async (fun () -> T.input t ~listeners:(function x when x = server_port -> Some server_cb | _ -> None) ~src ~dst tcp);
+           first := None ;
+           Lwt.return_unit
+         | Some flow, None when flow_matches_packet flow src src_port dst dst_port ->
+           let (_, _, _, server_port) = flow in
+           log_packet (Printf.sprintf "frame %d" count) (src, src_port, dst, dst_port) ;
+           Lwt.async (fun () -> T.input t ~listeners:(function x when x = server_port -> Some server_cb | _ -> None) ~src ~dst tcp);
+           Lwt.return_unit
+         | _ -> log "skipping unmatched TCP frame" ; Lwt.return_unit)
+      | _ -> log "skipping unmatched frame" ; Lwt.return_unit
     in
-    let setup_iface ?(timing=None) file ip nm =
 
+    let setup_iface ?(timing=None) file ip nm =
       let pcap_netif_id = P.id_of_desc ~mac:Macaddr.broadcast ~timing ~source:k ~read:file in
       (* build interface on top of netif *)
       or_error c "pcap_netif" P.connect pcap_netif_id >>= fun p ->
@@ -134,18 +142,22 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
       or_error c "tcpv4" T.connect i >>= fun t ->
 
       (* set up ipv4 statically *)
-      I.set_ip i ip >>= fun () -> I.set_ip_netmask i nm >>= fun () ->
+      I.set_ip i ip >>= fun () ->
+      I.set_ip_netmask i nm >>= fun () ->
+      Lwt.return (p, e, i, t)
+    in
 
-      Lwt.return (p, e, i, t)
-    in
     let play_pcap (p, e, i, t) =
-      P.listen p (E.input
+      let ip_cb = recv_ip i t in
+      let count = ref 0 in
+      P.listen p (count := succ !count ;
+                  E.input
                     ~arpv4:(fun buf -> Lwt.return_unit)
-                    ~ipv4:(fun buf -> recv_ip i t buf)
-                    ~ipv6:(fun buf -> Lwt.return_unit) e
-                 ) >>= fun () ->
+                    ~ipv4:(fun buf -> ip_cb !count buf)
+                    ~ipv6:(fun buf -> Lwt.return_unit) e) >>= fun () ->
       Lwt.return (p, e, i, t)
     in
+
     Lwt.async_exception_hook := (fun e ->
         Printf.printf "exception %s, backtrace\n%s"
           (Printexc.to_string e) (Printexc.get_backtrace ())) ;
@@ -154,9 +166,9 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
     Tcp.(Log.enable Segment.debug);
     setup_iface file ip nm >>= fun x ->
     play_pcap x >>= fun (p, e, i, t) ->
-    (* test_send_arps p e u >>= fun result ->
-       assert_equal ~printer `Success result; *)
-    Printf.printf "finished... client data %d:" (List.length !client_data) ; List.iter Cstruct.hexdump !client_data ;
-    Printf.printf "server data %d:" (List.length !server_data) ; List.iter Cstruct.hexdump !server_data ;
+    log (Printf.sprintf "finished... client data %d:" (List.length !client_data)) ;
+    List.iter Cstruct.hexdump !client_data ;
+    log (Printf.sprintf "server data %d:" (List.length !server_data)) ;
+    List.iter Cstruct.hexdump !server_data ;
     Lwt.return_unit
 end
