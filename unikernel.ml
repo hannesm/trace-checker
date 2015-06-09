@@ -1,12 +1,13 @@
 open V1_LWT
 open Lwt
 
-module Main (C: CONSOLE) (K: KV_RO) = struct
+module Main (C : CONSOLE) (K : KV_RO) (L : KV_RO) = struct
   module P = Netif.Make(K)(OS.Time)
   module E = Ethif.Make(P)
   module I = Ipv4.Make(E)(Clock)(OS.Time)
   module T = Tcp.Flow.Make(I)(OS.Time)(Clock)(Random)
   (*  module Stack = Tcpip_stack_direct.Make(C)(OS.Time)(Random)(Netif)(Stackv41_E)(Stackv41_I)(Stackv41_U)(Stackv41_T) *)
+  module X509 = Tls_mirage.X509(L)(Clock)
 
   let file = "tlssession.pcap"
 
@@ -14,7 +15,7 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
   let ip = Ipaddr.V4.of_string_exn "1.1.1.1"
   let nm = Ipaddr.V4.of_string_exn "0.0.0.0"
 
-  let start c k =
+  let start c k keys =
 
     let or_error c name fn t =
       fn t >>= function
@@ -168,9 +169,46 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
     Tcp.(Log.enable Segment.debug);
     setup_iface file ip nm >>= fun x ->
     play_pcap x >>= fun (p, e, i, t) ->
-    log (Printf.sprintf "finished... client data %d:" (List.length !client_data)) ;
-    List.iter Cstruct.hexdump !client_data ;
-    log (Printf.sprintf "server data %d:" (List.length !server_data)) ;
-    List.iter Cstruct.hexdump !server_data ;
+
+    log (Printf.sprintf "finished... %d client data %d server data" (List.length !client_data) (List.length !server_data)) ;
+
+    let open Tls in
+    (* what is our config? and initial state! *)
+    let rec mix c s =
+      match c, s with
+      | [], [] -> []
+      | [c], [] ->
+        ( match Engine.separate_records c with
+          | Ok (xs, rest) ->
+            assert (Cstruct.len rest = 0) ;
+            List.map (fun x -> `RecordIn x) xs )
+      | c::cs, s::ss ->
+        match Engine.separate_records c, Engine.separate_records s with
+        | Ok (xs, rest), Ok (ys, rest') ->
+          assert (Cstruct.len rest = 0) ;
+          assert (Cstruct.len rest' = 0) ;
+          let c = List.map (fun x -> `RecordIn x) xs in
+          let s = List.map (fun (hdr, data) -> `RecordOut (hdr.Core.content_type, data)) ys in
+          c @ s @ mix cs ss
+        | _ -> assert false
+    in
+
+    let trace = mix (List.rev !server_data) (List.rev !client_data) in
+    log ("tracce is " ^ string_of_int (List.length trace)) ;
+    let t =
+      String.concat "\n"
+        (List.map
+           (fun x -> Sexplib.Sexp.to_string_hum (Tracer_common.sexp_of_trace x))
+           trace)
+    in
+    log ("trace is: " ^ t) ;
+
+    X509.certificate keys `Default >>= fun (cert, priv) ->
+    let config = Tls.Config.server ~certificates:(`Single (cert, priv)) () in
+    let state = Engine.server config in
+
+    let r = Tracer_replay.replay state state [] trace 0 None true in
+    log ("trace result: " ^ (Sexplib.Sexp.to_string_hum (Tracer_replay.sexp_of_ret r))) ;
+
     Lwt.return_unit
 end
