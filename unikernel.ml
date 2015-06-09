@@ -52,7 +52,7 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
       let rec recv () =
         T.read flow >>= function
         | `Ok buf -> client_data := buf :: !client_data ; recv ()
-        | err -> Lwt.return_unit
+        | _ -> Lwt.return_unit
       in
       recv ()
     in
@@ -67,7 +67,11 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
        Ipaddr.V4.compare f_d src = 0 &&
        f_s_p = dst_port && f_d_p = src_port)
     in
-    let recv_ip ip t count buf =
+    let frameno = ref 0 in
+
+    let recv_ip ip t buf =
+      frameno := succ !frameno ;
+      let count = !frameno in
       let proto = Wire_structs.Ipv4_wire.get_ipv4_proto buf in
       match Wire_structs.Ipv4_wire.int_to_protocol proto with
       | Some `TCP ->
@@ -148,14 +152,12 @@ module Main (C: CONSOLE) (K: KV_RO) = struct
     in
 
     let play_pcap (p, e, i, t) =
-      let ip_cb = recv_ip i t in
-      let count = ref 0 in
-      P.listen p (count := succ !count ;
-                  E.input
+      P.listen p (E.input
                     ~arpv4:(fun buf -> Lwt.return_unit)
-                    ~ipv4:(fun buf -> ip_cb !count buf)
-                    ~ipv6:(fun buf -> Lwt.return_unit) e) >>= fun () ->
-      Lwt.return (p, e, i, t)
+                    ~ipv4:(fun buf -> recv_ip i t buf)
+                    ~ipv6:(fun buf -> Lwt.return_unit) e)
+      >|= fun () ->
+      (p, e, i, t)
     in
 
     Lwt.async_exception_hook := (fun e ->
