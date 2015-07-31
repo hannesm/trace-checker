@@ -4,7 +4,8 @@ open Lwt
 module Main (C : CONSOLE) (K : KV_RO) (L : KV_RO) = struct
   module P = Netif.Make(K)(OS.Time)
   module E = Ethif.Make(P)
-  module I = Ipv4.Make(E)(Clock)(OS.Time)
+  module A = Arpv4.Make(E)(Clock)(OS.Time)
+  module I = Ipv4.Make(E)(A)
   module T = Tcp.Flow.Make(I)(OS.Time)(Clock)(Random)
   (*  module Stack = Tcpip_stack_direct.Make(C)(OS.Time)(Random)(Netif)(Stackv41_E)(Stackv41_I)(Stackv41_U)(Stackv41_T) *)
   module X509 = Tls_mirage.X509(L)(Clock)
@@ -70,7 +71,7 @@ module Main (C : CONSOLE) (K : KV_RO) (L : KV_RO) = struct
     in
     let frameno = ref 0 in
 
-    let recv_ip ip t buf =
+    let recv_ip a ip t buf =
       frameno := succ !frameno ;
       let count = !frameno in
       let proto = Wire_structs.Ipv4_wire.get_ipv4_proto buf in
@@ -101,10 +102,10 @@ module Main (C : CONSOLE) (K : KV_RO) (L : KV_RO) = struct
               (* setup stack: IP address and arp entries *)
               I.set_ip ip src >>= fun () ->
               let insert_arp ipaddr =
-                let frame = Cstruct.create 42 in (* length of an ARP frame + ethernet *)
-                Cstruct.BE.set_uint16 frame 20 2 ; (* ARP reply *)
-                Cstruct.BE.set_uint32 frame 28 (Ipaddr.V4.to_int32 ipaddr) ; (* sender protocol address *)
-                I.input_arpv4 ip frame
+                let frame = Cstruct.create 28 in (* length of an ARP frame + ethernet *)
+                Cstruct.BE.set_uint16 frame 6 2 ; (* ARP reply *)
+                Cstruct.BE.set_uint32 frame 14 (Ipaddr.V4.to_int32 ipaddr) ; (* sender protocol address *)
+                A.input a frame
               in
               insert_arp src >>= fun () ->
               insert_arp dst >|= fun () ->
@@ -143,22 +144,23 @@ module Main (C : CONSOLE) (K : KV_RO) (L : KV_RO) = struct
       or_error c "pcap_netif" P.connect pcap_netif_id >>= fun p ->
       or_error c "ethif" E.connect p >>= fun e ->
       E.enable_promiscuous_mode e ;
-      or_error c "ipv4" I.connect e >>= fun i ->
+      or_error c "Arpv4" A.connect e >>= fun a ->
+      or_error c "ipv4" (I.connect e) a >>= fun i ->
       or_error c "tcpv4" T.connect i >>= fun t ->
 
       (* set up ipv4 statically *)
       I.set_ip i ip >>= fun () ->
       I.set_ip_netmask i nm >>= fun () ->
-      Lwt.return (p, e, i, t)
+      Lwt.return (p, e, a, i, t)
     in
 
-    let play_pcap (p, e, i, t) =
+    let play_pcap (p, e, a, i, t) =
       P.listen p (E.input
                     ~arpv4:(fun buf -> Lwt.return_unit)
-                    ~ipv4:(fun buf -> recv_ip i t buf)
+                    ~ipv4:(fun buf -> recv_ip a i t buf)
                     ~ipv6:(fun buf -> Lwt.return_unit) e)
       >|= fun () ->
-      (p, e, i, t)
+      (p, e, a, i, t)
     in
 
     Lwt.async_exception_hook := (fun e ->
@@ -168,9 +170,9 @@ module Main (C : CONSOLE) (K : KV_RO) (L : KV_RO) = struct
     Tcp.(Log.enable State.debug);
     Tcp.(Log.enable Segment.debug);
     setup_iface file ip nm >>= fun x ->
-    play_pcap x >>= fun (p, e, i, t) ->
+    play_pcap x >>= fun (p, e, a, i, t) ->
 
-    log (Printf.sprintf "finished... %d client data %d server data" (List.length !client_data) (List.length !server_data)) ;
+    log (Printf.sprintf "finished reading of pcap... %d client data %d server data" (List.length !client_data) (List.length !server_data)) ;
 
     let open Tls in
     (* what is our config? and initial state! *)
@@ -194,7 +196,8 @@ module Main (C : CONSOLE) (K : KV_RO) (L : KV_RO) = struct
     in
 
     let trace = mix (List.rev !server_data) (List.rev !client_data) in
-    log ("tracce is " ^ string_of_int (List.length trace)) ;
+    log "" ;
+    log ("NOW replaying trace with length " ^ string_of_int (List.length trace)) ;
     let t =
       String.concat "\n"
         (List.map
