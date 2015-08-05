@@ -8,8 +8,8 @@ maintainer:   ["Hannes Mehnert <hannes@mehnert.org>"]
 license:      "BSD2"
 
 build: [
-  ["mirage" "configure" "--unix"]
-  ["mirage" "build"]
+  ["mirage" "configure" "--unix" "--no-opam"]
+  [make]
 ]
 depends: [
   "ocamlfind" {build}
