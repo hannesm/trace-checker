@@ -1,0 +1,4 @@
+bin: [
+  "?_build/main.byte" {"trace-checker"}
+  "?_build/main.native" {"trace-checker"}
+]

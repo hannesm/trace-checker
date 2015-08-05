@@ -1,0 +1,25 @@
+opam-version: "1.2"
+name:         "tlstunnel"
+homepage:     "https://github.com/hannesm/tlstunnel"
+dev-repo:     "https://github.com/hannesm/tlstunnel.git"
+bug-reports:  "https://github.com/hannesm/tlstunnel/issues"
+author:       ["Hannes Mehnert <hannes@mehnert.org>"]
+maintainer:   ["Hannes Mehnert <hannes@mehnert.org>"]
+license:      "BSD2"
+
+build: [
+  ["mirage" "configure" "--unix"]
+  ["mirage" "build"]
+]
+depends: [
+  "ocamlfind" {build}
+  "tls" {>= "0.6.0"}
+  "x509" {>= "0.3.0"}
+  "nocrypto" {>= "0.4.0"}
+  "mirage" {>= "2.6.0"}
+  "mirage-types-lwt" {>= "2.6.0"}
+  "tcpip" {>= "2.6.0"}
+  "pcap-format"
+  "mirage-net-pcap"
+  "mirage-clock-unix"
+]
