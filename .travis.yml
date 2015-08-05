@@ -1,0 +1,9 @@
+language: c
+install: wget https://raw.githubusercontent.com/ocaml/ocaml-travisci-skeleton/master/.travis-opam.sh
+script: bash -ex .travis-opam.sh
+sudo: required
+env:
+  - PACKAGE="trace-checker" OCAML_VERSION=4.01 UPDATE_GCC_BINUTILS=1 PINS="nocrypto asn1-combinators x509:https://github.com/mirleft/ocaml-x509.git#tracing tls:https://github.com/mirleft/ocaml-tls.git#tracing tcpip:https://github.com/hannesm/mirage-tcpip.git#reflow mirage-net-pcap:https://github.com/hannesm/mirage-net-pcap.git"
+  - PACKAGE="trace-checker" OCAML_VERSION=latest UPDATE_GCC_BINUTILS=1 DEPOPTS=lwt PINS="nocrypto asn1-combinators x509:https://github.com/mirleft/ocaml-x509.git#tracing tls:https://github.com/mirleft/ocaml-tls.git#tracing tcpip:https://github.com/hannesm/mirage-tcpip.git#reflow mirage-net-pcap:https://github.com/hannesm/mirage-net-pcap.git"
+notifications:
+  email: false
